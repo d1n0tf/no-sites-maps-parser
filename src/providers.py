@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import base64
+import binascii
+import html
 import random
 import re
 import time
@@ -31,6 +34,43 @@ window.chrome = { runtime: {} };
 Object.defineProperty(navigator, 'languages', {get: () => ['ru-RU', 'ru', 'en-US', 'en']});
 Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
 """
+
+HTTP_URL_RE = re.compile(r"https?://[^\s<>'\"]+")
+WEBSITE_EXCLUDED_DOMAINS = (
+    "2gis.ru",
+    "2gis.com",
+    "2gis.am",
+    "2gis.ae",
+    "2gis.az",
+    "2gis.by",
+    "2gis.ge",
+    "2gis.kg",
+    "2gis.kz",
+    "2gis.tj",
+    "2gis.uz",
+    "vk.com",
+    "t.me",
+    "telegram.me",
+    "telegram.org",
+    "wa.me",
+    "whatsapp.com",
+    "facebook.com",
+    "instagram.com",
+    "linkedin.com",
+    "max.ru",
+    "ok.ru",
+    "rutube.ru",
+    "twitter.com",
+    "x.com",
+    "youtube.com",
+    "youtu.be",
+    "info2gis.tilda.ws",
+    "onelink.me",
+)
+WEBSITE_PROXY_DOMAINS = (
+    "link.2gis.ru",
+    "info2gis.tilda.ws",
+)
 
 
 class ProviderBlockedError(RuntimeError):
@@ -94,6 +134,92 @@ def extract_multiline_value(text: str) -> str:
     if len(parts) == 1:
         return parts[0]
     return " ".join(parts[1:])
+
+
+def _domain_matches(host: str, domain: str) -> bool:
+    return host == domain or host.endswith(f".{domain}")
+
+
+def is_excluded_website_domain(host: str) -> bool:
+    return any(_domain_matches(host, domain) for domain in WEBSITE_EXCLUDED_DOMAINS)
+
+
+def is_proxy_website_domain(host: str) -> bool:
+    return any(_domain_matches(host, domain) for domain in WEBSITE_PROXY_DOMAINS)
+
+
+def extract_proxy_path_website_candidates(parsed_href: urllib.parse.ParseResult) -> list[str]:
+    host = (parsed_href.hostname or "").casefold()
+    path_segments = [segment for segment in parsed_href.path.split("/") if segment]
+    if host != "link.2gis.ru" or len(path_segments) < 3 or not path_segments[0].startswith("4."):
+        return []
+
+    encoded_payload = urllib.parse.unquote(path_segments[2])
+    padding = "=" * (-len(encoded_payload) % 4)
+    try:
+        decoded_payload = base64.urlsafe_b64decode(encoded_payload + padding).decode("utf-8")
+    except (binascii.Error, UnicodeDecodeError, ValueError):
+        return []
+
+    return [
+        line.rstrip(".,);")
+        for line in decoded_payload.splitlines()
+        if line.startswith(("http://", "https://"))
+    ]
+
+
+def extract_business_website_candidates(href: str) -> list[str]:
+    normalized_href = html.unescape(href).strip()
+    if not normalized_href.startswith(("http://", "https://")):
+        return []
+
+    parsed_href = urllib.parse.urlparse(normalized_href)
+    direct_host = (parsed_href.hostname or "").casefold()
+    candidates: list[str] = []
+
+    if direct_host and not is_proxy_website_domain(direct_host):
+        candidates.append(normalized_href)
+    else:
+        candidates.extend(extract_proxy_path_website_candidates(parsed_href))
+
+    query_payload = html.unescape(parsed_href.query)
+    if query_payload:
+        if "=" in query_payload:
+            query_pairs = urllib.parse.parse_qsl(query_payload, keep_blank_values=True)
+            for _, value in query_pairs:
+                decoded_value = urllib.parse.unquote(html.unescape(value))
+                if decoded_value.startswith(("http://", "https://")):
+                    candidates.append(decoded_value.rstrip(".,);"))
+        else:
+            decoded_query = urllib.parse.unquote(query_payload)
+            if decoded_query.startswith(("http://", "https://")):
+                candidates.append(decoded_query.rstrip(".,);"))
+
+    fragment_payload = urllib.parse.unquote(html.unescape(parsed_href.fragment))
+    if fragment_payload:
+        for match in HTTP_URL_RE.findall(fragment_payload):
+            candidates.append(match.rstrip(".,);"))
+
+    deduplicated: list[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        if candidate not in seen:
+            seen.add(candidate)
+            deduplicated.append(candidate)
+    return deduplicated
+
+
+def has_business_website_link(hrefs: list[str]) -> bool:
+    for href in hrefs:
+        for candidate in extract_business_website_candidates(href):
+            parsed_candidate = urllib.parse.urlparse(candidate)
+            host = (parsed_candidate.hostname or "").casefold()
+            if not host:
+                continue
+            if is_excluded_website_domain(host):
+                continue
+            return True
+    return False
 
 
 class BaseMapsScraper(ABC):
@@ -199,10 +325,7 @@ class BaseMapsScraper(ABC):
                 stagnant_rounds = 0
 
             if items:
-                self.driver.execute_script(
-                    "arguments[0].scrollIntoView({block: 'end'});",
-                    items[-1],
-                )
+                self._scroll_results_container(items[-1])
                 self.pause(1.0, 1.6)
             else:
                 break
@@ -211,6 +334,45 @@ class BaseMapsScraper(ABC):
                 break
 
         return urls[:max_results] if max_results is not None else urls
+
+    def _scroll_results_container(self, item: WebElement) -> None:
+        self.driver.execute_script(
+            """
+            const item = arguments[0];
+            if (!item) {
+                return;
+            }
+
+            const scrollableOverflow = new Set(["auto", "scroll", "overlay"]);
+
+            function isScrollable(element) {
+                if (!element) {
+                    return false;
+                }
+
+                const style = window.getComputedStyle(element);
+                return (
+                    (element.getAttribute("data-scroll") === "true" ||
+                        scrollableOverflow.has(style.overflowY)) &&
+                    element.scrollHeight > element.clientHeight + 8
+                );
+            }
+
+            item.scrollIntoView({ block: "end", inline: "nearest" });
+
+            let container = item.parentElement;
+            while (container && container !== document.body && container !== document.documentElement) {
+                if (isScrollable(container)) {
+                    container.scrollTop = container.scrollHeight;
+                    return;
+                }
+                container = container.parentElement;
+            }
+
+            window.scrollBy(0, Math.max(Math.floor(window.innerHeight * 0.85), 320));
+            """,
+            item,
+        )
 
     @abstractmethod
     def search_category_urls(
@@ -388,6 +550,8 @@ class YandexMapsScraper(BaseMapsScraper):
 
 class TwoGisScraper(BaseMapsScraper):
     provider_key = "2gis"
+    SEARCH_RESULT_SELECTOR = 'a[href*="/firm/"]'
+    PAGE_NUMBER_RE = re.compile(r"/page/(\d+)(?:[/?#]|$)")
 
     def search_category_urls(
         self,
@@ -399,22 +563,55 @@ class TwoGisScraper(BaseMapsScraper):
             return []
 
         query = urllib.parse.quote(f"{search_term} {city.query_name}")
-        self.driver.get(f"{city.two_gis_base_url}/search/{query}")
-        self.pause(4.5, 5.5)
-        self._resolve_captcha_if_needed()
+        search_url = f"{city.two_gis_base_url}/search/{query}"
+        urls: list[str] = []
+        seen: set[str] = set()
+        visited_pages: set[str] = set()
+        requested_page = 1
 
-        try:
-            self.wait.until(
-                EC.presence_of_all_elements_located((By.CSS_SELECTOR, 'a[href*="/firm/"]'))
+        while True:
+            self.driver.get(self._build_search_page_url(search_url, requested_page))
+            self.pause(4.5, 5.5)
+            self._resolve_captcha_if_needed()
+
+            current_page_url = self.normalize_detail_url(self.driver.current_url)
+            if current_page_url in visited_pages:
+                break
+
+            if not self._wait_for_search_results():
+                break
+            visited_pages.add(current_page_url)
+
+            current_page = self._extract_search_page_number(current_page_url)
+            if current_page < requested_page:
+                break
+
+            remaining = None if max_results is None else max_results - len(urls)
+            page_urls = self.collect_detail_urls(
+                item_selector=self.SEARCH_RESULT_SELECTOR,
+                max_results=remaining,
+                extractor=self._extract_result_url,
             )
-        except TimeoutException:
-            return []
 
-        return self.collect_detail_urls(
-            item_selector='a[href*="/firm/"]',
-            max_results=max_results,
-            extractor=self._extract_result_url,
-        )
+            added = 0
+            for page_result_url in page_urls:
+                normalized_url = self.normalize_detail_url(page_result_url)
+                if normalized_url in seen:
+                    continue
+
+                seen.add(normalized_url)
+                urls.append(normalized_url)
+                added += 1
+
+                if max_results is not None and len(urls) >= max_results:
+                    return urls[:max_results]
+
+            if added == 0:
+                break
+
+            requested_page = current_page + 1
+
+        return urls[:max_results] if max_results is not None else urls
 
     def fetch_snapshot(self, detail_url: str, city: CityOption) -> VenueSnapshot | None:
         self.driver.get(detail_url)
@@ -445,6 +642,26 @@ class TwoGisScraper(BaseMapsScraper):
     def _extract_result_url(self, item: WebElement) -> str | None:
         return item.get_attribute("href")
 
+    def _wait_for_search_results(self) -> bool:
+        try:
+            self.wait.until(
+                EC.presence_of_all_elements_located((By.CSS_SELECTOR, self.SEARCH_RESULT_SELECTOR))
+            )
+        except TimeoutException:
+            return False
+        return True
+
+    def _build_search_page_url(self, search_url: str, page_number: int) -> str:
+        if page_number <= 1:
+            return search_url
+        return f"{search_url}/page/{page_number}"
+
+    def _extract_search_page_number(self, current_url: str) -> int:
+        match = self.PAGE_NUMBER_RE.search(current_url)
+        if not match:
+            return 1
+        return int(match.group(1))
+
     def _extract_address(self, city: CityOption) -> str:
         geo_links = [
             clean_text(anchor.text)
@@ -461,11 +678,42 @@ class TwoGisScraper(BaseMapsScraper):
         return title
 
     def _has_website_link(self) -> bool:
+        hrefs = self._collect_card_hrefs()
+        if hrefs and has_business_website_link(hrefs):
+            return True
+
         for anchor in self.driver.find_elements(By.CSS_SELECTOR, 'a[href^="http"]'):
             outer_html = anchor.get_attribute("outerHTML") or ""
-            if '"type":"website"' in outer_html:
-                return True
+            if '"type":"website"' in outer_html or 'type="website"' in outer_html:
+                href = anchor.get_attribute("href") or ""
+                if has_business_website_link([href]):
+                    return True
         return False
+
+    def _collect_card_hrefs(self) -> list[str]:
+        hrefs: list[str] = []
+        seen: set[str] = set()
+        containers: list[WebElement] = []
+        headings = self.driver.find_elements(By.CSS_SELECTOR, "h1")
+
+        if headings:
+            try:
+                containers.append(
+                    headings[0].find_element(By.XPATH, './ancestor::*[@data-scroll="true"][1]')
+                )
+            except Exception:
+                pass
+
+        containers.extend(self.driver.find_elements(By.CSS_SELECTOR, '[data-rack="true"]'))
+
+        for container in containers:
+            for anchor in container.find_elements(By.CSS_SELECTOR, "a[href]"):
+                href = anchor.get_attribute("href") or ""
+                if href and href not in seen:
+                    seen.add(href)
+                    hrefs.append(href)
+
+        return hrefs
 
     def _resolve_captcha_if_needed(self) -> None:
         if "captcha.2gis" not in self.driver.current_url and "captcha" not in self.driver.title.lower():

@@ -11,3 +11,4 @@ wheels/
 
 # Production files
 output*/
+.tmp/
