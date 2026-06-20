@@ -124,7 +124,7 @@ wheels = [
 ]
 
 [[package]]
-name = "no-reviews-maps-parser"
+name = "no-sites-maps-parser"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
