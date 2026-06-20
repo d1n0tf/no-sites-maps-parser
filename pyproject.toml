@@ -1,5 +1,5 @@
 [project]
-name = "no-reviews-maps-parser"
+name = "no-sites-maps-parser"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
