@@ -4,6 +4,7 @@ import base64
 import unittest
 
 from src.providers import (
+    extract_marked_website_links,
     extract_business_website_candidates,
     has_business_website_link,
 )
@@ -45,6 +46,54 @@ class TwoGisWebsiteDetectionTests(unittest.TestCase):
             "http://blabla.bar/?utm_source=2gis&utm_medium=prioritet",
             extract_business_website_candidates(hrefs[1]),
         )
+
+    def test_detects_nested_2gis_proxy_target(self) -> None:
+        href = (
+            "http://link.2gis.ru/1.2/46D09650/online/20260601/project32/"
+            "70000001080132516/null/example?"
+            "http://info2gis.tilda.ws/proxy18?"
+            "target=https%3A%2F%2Fshibasushibar.ru%2F&"
+            "back=https%3A%2F%2F2gis.ru%2Fmoscow%2Fgeo%2F70000001080132516&mode=0"
+        )
+
+        self.assertTrue(has_business_website_link([href]))
+        self.assertIn("https://shibasushibar.ru/", extract_business_website_candidates(href))
+
+    def test_extracts_marked_website_links_from_2gis_card_markup(self) -> None:
+        markup = (
+            '<script>{"contact_groups":[{"contacts":[{"url":'
+            '"http:\\/\\/info2gis.tilda.ws\\/proxy18?'
+            "target=https%3A%2F%2Fshibasushibar.ru%2F&"
+            "back=https%3A%2F%2F2gis.ru%2Fmoscow%2Fgeo%2F70000001080132516&mode=0"
+            '","text":"shibasushibar.ru","type":"website","value":'
+            '"http:\\/\\/link.2gis.ru\\/1.2\\/46D09650\\/online\\/20260601'
+            "\\/project32\\/70000001080132516\\/null\\/example?"
+            "http:\\/\\/info2gis.tilda.ws\\/proxy18?"
+            "target=https%3A%2F%2Fshibasushibar.ru%2F&"
+            "back=https%3A%2F%2F2gis.ru%2Fmoscow%2Fgeo%2F70000001080132516&mode=0"
+            '"}]}]}</script>'
+        )
+
+        links = extract_marked_website_links(markup)
+
+        self.assertTrue(has_business_website_link(links))
+
+    def test_ignores_marked_social_links_from_2gis_card_markup(self) -> None:
+        markup = (
+            '<script>{"contact_groups":[{"contacts":[{"url":'
+            '"http:\\/\\/info2gis.tilda.ws\\/proxy18?'
+            "target=https%3A%2F%2Fvk.com%2Fshibainucafe&"
+            "back=https%3A%2F%2Fgo.2gis.com%2FCGngP&mode=0"
+            '","text":"vk.com/shibainucafe","type":"website"},{"url":'
+            '"http:\\/\\/info2gis.tilda.ws\\/proxy18?'
+            "target=https%3A%2F%2Ft.me%2Fshibainu_cafe&"
+            "back=https%3A%2F%2Fgo.2gis.com%2FCGngP&mode=0"
+            '","text":"t.me/shibainu_cafe","type":"website"}]}]}</script>'
+        )
+
+        links = extract_marked_website_links(markup)
+
+        self.assertFalse(has_business_website_link(links))
 
     def test_ignores_social_and_2gis_service_links(self) -> None:
         hrefs = [

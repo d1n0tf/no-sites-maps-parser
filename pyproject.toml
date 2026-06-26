@@ -9,3 +9,13 @@ dependencies = [
     "selenium>=4.44.0",
     "webdriver-manager>=4.1.2",
 ]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
+
+[tool.pytest.ini_options]
+pythonpath = [
+    ".",
+]

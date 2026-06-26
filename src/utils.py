@@ -39,6 +39,17 @@ def prompt_search_query(title: str) -> str:
         print("Нужно ввести название или его часть.")
 
 
+def prompt_candidate_limit() -> int | None:
+    while True:
+        raw_value = input("\nЛимит кандидатов на запрос и источник (0 = без лимита)\n> ").strip()
+        if not raw_value:
+            return None
+        if raw_value.isdigit():
+            limit = int(raw_value)
+            return limit if limit > 0 else None
+        print("Нужно ввести 0 или положительное число.")
+
+
 def format_city_option(city: CityOption) -> str:
     if city.two_gis_base_url:
         return f"{city.label} (есть 2ГИС)"

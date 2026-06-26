@@ -30,6 +30,28 @@ class FakeDriver:
             self.visible_page += 1
 
 
+class DelayedFakeDriver(FakeDriver):
+    def __init__(self, pages: list[list[str]], scrolls_before_next_page: int) -> None:
+        super().__init__(pages)
+        self.scrolls_before_next_page = scrolls_before_next_page
+        self.scrolls_since_new_page = 0
+
+    def execute_script(self, script: str, item: FakeElement) -> bool:
+        self.executed_scripts.append(script)
+        if "scrollTop" not in script:
+            return False
+
+        if self.visible_page >= len(self.pages) - 1:
+            return False
+
+        self.scrolls_since_new_page += 1
+        if self.scrolls_since_new_page >= self.scrolls_before_next_page:
+            self.visible_page += 1
+            self.scrolls_since_new_page = 0
+
+        return True
+
+
 class DummyScraper(BaseMapsScraper):
     provider_key = "google"
 
@@ -103,6 +125,31 @@ class CollectDetailUrlsTests(unittest.TestCase):
                 "https://example.test/1",
                 "https://example.test/2",
                 "https://example.test/3",
+            ],
+        )
+
+    def test_keeps_scrolling_while_list_moves_without_new_urls(self) -> None:
+        scraper = DummyScraper(
+            DelayedFakeDriver(
+                [
+                    ["https://example.test/1"],
+                    ["https://example.test/2"],
+                ],
+                scrolls_before_next_page=6,
+            )
+        )
+
+        urls = scraper.collect_detail_urls(
+            item_selector='a[href*="/firm/"]',
+            max_results=None,
+            extractor=lambda item: item.href,
+        )
+
+        self.assertEqual(
+            urls,
+            [
+                "https://example.test/1",
+                "https://example.test/2",
             ],
         )
 

@@ -17,11 +17,24 @@ from .providers import create_scraper
 from .utils import (
     aggregate_records,
     format_city_option,
+    prompt_candidate_limit,
     prompt_choice,
     prompt_search_query,
     render_preview,
     save_results,
 )
+
+
+def non_negative_int(value: str) -> int:
+    try:
+        parsed_value = int(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("нужно ввести целое число") from error
+
+    if parsed_value < 0:
+        raise argparse.ArgumentTypeError("лимит не может быть отрицательным")
+    return parsed_value
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -48,8 +61,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--max-results",
-        type=int,
-        help="Необязательный лимит карточек на каждый поисковый запрос и источник.",
+        type=non_negative_int,
+        help="Лимит карточек на каждый поисковый запрос и источник. 0 = без лимита.",
     )
     parser.add_argument(
         "--headless",
@@ -117,6 +130,12 @@ def provider_sequence(provider_key: str) -> list[str]:
     return [provider_key]
 
 
+def choose_max_results(max_results_arg: int | None) -> int | None:
+    if max_results_arg is None:
+        return prompt_candidate_limit()
+    return max_results_arg if max_results_arg > 0 else None
+
+
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
@@ -124,6 +143,7 @@ def main() -> None:
     provider_key = choose_provider(args.provider)
     country, city = choose_country_and_city(args)
     search_terms = [term.strip() for term in (args.queries or DEFAULT_SEARCH_TERMS) if term.strip()]
+    max_results = choose_max_results(args.max_results)
 
     print("=" * 72)
     print("ПАРСЕР ЗАВЕДЕНИЙ БЕЗ САЙТА")
@@ -136,10 +156,10 @@ def main() -> None:
     else:
         print(f"Режим поиска: {SEARCH_MODE_LABEL}")
         print(f"Внутренние запросы: {', '.join(search_terms)}")
-    if args.max_results is None:
+    if max_results is None:
         print("Лимит на запрос: без лимита")
     else:
-        print(f"Лимит на запрос: {args.max_results}")
+        print(f"Лимит на запрос: {max_results}")
 
     if provider_key == "2gis" and city.two_gis_base_url is None:
         print(
@@ -169,7 +189,7 @@ def main() -> None:
                 city=city,
                 country_label=country.label,
                 search_terms=search_terms,
-                max_results=args.max_results,
+                max_results=max_results,
             )
             records.extend(provider_records)
             print(f"\n[{scraper.label}] Найдено заведений без сайта: {len(provider_records)}")

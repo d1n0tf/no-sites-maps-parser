@@ -30,6 +30,7 @@ uv run python main.py
 ```
 
 Скрипт сам предложит выбрать страну, источник и строку поиска по населенному пункту.
+Также он спросит лимит кандидатов на запрос и источник: `0` или пустой ввод означают без лимита.
 
 ## Запуск через аргументы
 
@@ -45,13 +46,25 @@ uv run python main.py --country belarus --location minsk --provider yandex --max
 uv run python main.py --country russia --location balashikha --provider all --queries кафе ресторан
 ```
 
+## Проверка окружения
+
+```bash
+uv run pytest
+```
+
+Если Selenium не может скачать ChromeDriver из интернета, проект сначала попробует найти Chrome и `chromedriver` в системе и в кэше `~/.cache/selenium`. Пути можно задать явно:
+
+```bash
+CHROME_BINARY=/path/to/chrome CHROMEDRIVER=/path/to/chromedriver uv run python main.py
+```
+
 ## Параметры
 
 - `--country` — код страны
 - `--location` — город или населенный пункт внутри выбранной страны
 - `--provider` — `all`, `google`, `yandex`, `2gis`
 - `--queries` — свои поисковые запросы через пробел
-- `--max-results` — необязательный лимит карточек на каждый поисковый запрос и источник
+- `--max-results` — лимит карточек на каждый поисковый запрос и источник; `0` означает без лимита
 - `--headless` — скрытый режим браузера
 
 ## Важно

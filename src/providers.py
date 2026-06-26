@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import binascii
 import html
+import os
 import random
 import re
 import time
@@ -15,6 +16,7 @@ from shutil import which
 from selenium import webdriver
 from selenium.common.exceptions import TimeoutException
 from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service as ChromeService
 from selenium.webdriver.common.by import By
 from selenium.webdriver.remote.webelement import WebElement
 from selenium.webdriver.support import expected_conditions as EC
@@ -24,9 +26,25 @@ from .models import CityOption, VenueRecord, VenueSnapshot
 from .utils import clean_text
 
 CHROME_CANDIDATES = (
+    Path("/usr/bin/google-chrome"),
+    Path("/usr/bin/google-chrome-stable"),
+    Path("/usr/bin/chromium"),
+    Path("/usr/bin/chromium-browser"),
+    Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
     Path(r"C:\Program Files\Google\Chrome\Application\chrome.exe"),
     Path(r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe"),
 )
+CHROME_BINARY_ENV_VARS = ("CHROME_BINARY", "CHROME_PATH", "GOOGLE_CHROME_BIN")
+CHROMEDRIVER_ENV_VARS = ("CHROMEDRIVER", "CHROMEDRIVER_PATH")
+CHROME_EXECUTABLE_NAMES = (
+    "google-chrome",
+    "google-chrome-stable",
+    "chromium",
+    "chromium-browser",
+    "chrome",
+    "chrome.exe",
+)
+CHROMEDRIVER_EXECUTABLE_NAMES = ("chromedriver", "chromedriver.exe")
 
 ANTI_DETECT_SCRIPT = """
 Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
@@ -36,7 +54,10 @@ Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
 """
 
 HTTP_URL_RE = re.compile(r"https?://[^\s<>'\"]+")
-WEBSITE_EXCLUDED_DOMAINS = (
+JSON_ASCII_ESCAPE_RE = re.compile(r"\\u00([0-7][0-9a-fA-F])")
+VERSION_PART_RE = re.compile(r"\d+(?:\.\d+)+")
+WEBSITE_MARKER_RE = re.compile(r'"type"\s*:\s*"website"|type=["\']website["\']')
+TWO_GIS_DOMAINS = (
     "2gis.ru",
     "2gis.com",
     "2gis.am",
@@ -48,6 +69,8 @@ WEBSITE_EXCLUDED_DOMAINS = (
     "2gis.kz",
     "2gis.tj",
     "2gis.uz",
+)
+WEBSITE_EXCLUDED_DOMAINS = TWO_GIS_DOMAINS + (
     "vk.com",
     "t.me",
     "telegram.me",
@@ -86,16 +109,94 @@ def provider_label(provider_key: str) -> str:
     return labels[provider_key]
 
 
+def _existing_file(path: str | Path | None) -> Path | None:
+    if not path:
+        return None
+    candidate = Path(path).expanduser()
+    if candidate.is_file():
+        return candidate
+    return None
+
+
+def _candidate_from_env(env_vars: tuple[str, ...]) -> Path | None:
+    for env_var in env_vars:
+        candidate = _existing_file(os.environ.get(env_var))
+        if candidate:
+            return candidate
+    return None
+
+
+def _candidate_from_path(names: tuple[str, ...]) -> Path | None:
+    for name in names:
+        executable = which(name)
+        candidate = _existing_file(executable)
+        if candidate:
+            return candidate
+    return None
+
+
+def _cache_version(path: Path) -> tuple[int, ...]:
+    for part in reversed(path.parts):
+        if VERSION_PART_RE.fullmatch(part):
+            return tuple(int(value) for value in part.split("."))
+    return ()
+
+
+def _selenium_cache_candidates(cache_name: str, executable_names: tuple[str, ...]) -> list[Path]:
+    cache_dir = Path.home() / ".cache" / "selenium" / cache_name
+    if not cache_dir.exists():
+        return []
+
+    candidates: list[Path] = []
+    for executable_name in executable_names:
+        candidates.extend(path for path in cache_dir.glob(f"**/{executable_name}") if path.is_file())
+    return sorted(candidates, key=lambda path: (_cache_version(path), str(path)), reverse=True)
+
+
 def find_chrome_binary() -> str | None:
-    executable = which("chrome.exe")
-    if executable:
-        return executable
+    env_candidate = _candidate_from_env(CHROME_BINARY_ENV_VARS)
+    if env_candidate:
+        return str(env_candidate)
+
+    path_candidate = _candidate_from_path(CHROME_EXECUTABLE_NAMES)
+    if path_candidate:
+        return str(path_candidate)
 
     for candidate in CHROME_CANDIDATES:
-        if candidate.exists():
-            return str(candidate)
+        existing_candidate = _existing_file(candidate)
+        if existing_candidate:
+            return str(existing_candidate)
+
+    cached_candidates = _selenium_cache_candidates("chrome", CHROME_EXECUTABLE_NAMES)
+    if cached_candidates:
+        return str(cached_candidates[0])
 
     return None
+
+
+def find_chromedriver_binary(chrome_binary: str | None = None) -> str | None:
+    env_candidate = _candidate_from_env(CHROMEDRIVER_ENV_VARS)
+    if env_candidate:
+        return str(env_candidate)
+
+    path_candidate = _candidate_from_path(CHROMEDRIVER_EXECUTABLE_NAMES)
+    if path_candidate:
+        return str(path_candidate)
+
+    cached_candidates = _selenium_cache_candidates(
+        "chromedriver",
+        CHROMEDRIVER_EXECUTABLE_NAMES,
+    )
+    if not cached_candidates:
+        return None
+
+    chrome_version = _cache_version(Path(chrome_binary)) if chrome_binary else ()
+    if chrome_version:
+        for candidate in cached_candidates:
+            if _cache_version(candidate) == chrome_version:
+                return str(candidate)
+
+    return str(cached_candidates[0])
 
 
 def build_driver(headless: bool) -> webdriver.Chrome:
@@ -118,7 +219,12 @@ def build_driver(headless: bool) -> webdriver.Chrome:
     if binary_location:
         options.binary_location = binary_location
 
-    driver = webdriver.Chrome(options=options)
+    chromedriver_location = find_chromedriver_binary(binary_location)
+    if chromedriver_location:
+        service = ChromeService(executable_path=chromedriver_location)
+        driver = webdriver.Chrome(service=service, options=options)
+    else:
+        driver = webdriver.Chrome(options=options)
     driver.set_page_load_timeout(45)
     driver.execute_cdp_cmd(
         "Page.addScriptToEvaluateOnNewDocument",
@@ -144,8 +250,20 @@ def is_excluded_website_domain(host: str) -> bool:
     return any(_domain_matches(host, domain) for domain in WEBSITE_EXCLUDED_DOMAINS)
 
 
+def is_two_gis_domain(host: str) -> bool:
+    return any(_domain_matches(host, domain) for domain in TWO_GIS_DOMAINS)
+
+
 def is_proxy_website_domain(host: str) -> bool:
     return any(_domain_matches(host, domain) for domain in WEBSITE_PROXY_DOMAINS)
+
+
+def normalize_markup_urls(markup: str) -> str:
+    normalized_markup = html.unescape(markup).replace("\\/", "/")
+    return JSON_ASCII_ESCAPE_RE.sub(
+        lambda match: chr(int(match.group(1), 16)),
+        normalized_markup,
+    )
 
 
 def extract_proxy_path_website_candidates(parsed_href: urllib.parse.ParseResult) -> list[str]:
@@ -169,7 +287,7 @@ def extract_proxy_path_website_candidates(parsed_href: urllib.parse.ParseResult)
 
 
 def extract_business_website_candidates(href: str) -> list[str]:
-    normalized_href = html.unescape(href).replace("\\/", "/").strip()
+    normalized_href = normalize_markup_urls(href).strip()
     if not normalized_href.startswith(("http://", "https://")):
         return []
 
@@ -220,6 +338,27 @@ def has_business_website_link(hrefs: list[str]) -> bool:
                 continue
             return True
     return False
+
+
+def extract_marked_website_links(markup: str) -> list[str]:
+    normalized_markup = normalize_markup_urls(markup)
+    candidates: list[str] = []
+    seen: set[str] = set()
+
+    for marker in WEBSITE_MARKER_RE.finditer(normalized_markup):
+        start = max(0, marker.start() - 1200)
+        end = min(len(normalized_markup), marker.end() + 1200)
+        snippet = normalized_markup[start:end]
+
+        for url in HTTP_URL_RE.findall(snippet):
+            normalized_url = url.rstrip(".,);}")
+            if normalized_url in seen:
+                continue
+
+            seen.add(normalized_url)
+            candidates.append(normalized_url)
+
+    return candidates
 
 
 class BaseMapsScraper(ABC):
@@ -297,9 +436,17 @@ class BaseMapsScraper(ABC):
         urls: list[str] = []
         stagnant_rounds = 0
 
-        while stagnant_rounds < 5:
+        while stagnant_rounds < 8:
             items = self.driver.find_elements(By.CSS_SELECTOR, item_selector)
             before = len(urls)
+
+            def add_url(url: str) -> None:
+                normalized_url = self.normalize_detail_url(url)
+                if normalized_url in seen:
+                    return
+
+                seen.add(normalized_url)
+                urls.append(normalized_url)
 
             for item in items:
                 try:
@@ -310,37 +457,42 @@ class BaseMapsScraper(ABC):
                 if not url:
                     continue
 
-                normalized_url = self.normalize_detail_url(url)
-                if normalized_url in seen:
-                    continue
-
-                seen.add(normalized_url)
-                urls.append(normalized_url)
+                add_url(url)
                 if max_results is not None and len(urls) >= max_results:
                     break
 
-            if len(urls) == before:
-                stagnant_rounds += 1
-            else:
-                stagnant_rounds = 0
+            if max_results is None or len(urls) < max_results:
+                for url in self._extract_page_source_detail_urls():
+                    add_url(url)
+                    if max_results is not None and len(urls) >= max_results:
+                        break
 
+            scrolled = False
             if items:
-                self._scroll_results_container(items[-1])
+                scrolled = self._scroll_results_container(items[-1])
                 self.pause(1.0, 1.6)
             else:
                 break
+
+            if len(urls) == before and not scrolled:
+                stagnant_rounds += 1
+            else:
+                stagnant_rounds = 0
 
             if max_results is not None and len(urls) >= max_results:
                 break
 
         return urls[:max_results] if max_results is not None else urls
 
-    def _scroll_results_container(self, item: WebElement) -> None:
-        self.driver.execute_script(
+    def _extract_page_source_detail_urls(self) -> list[str]:
+        return []
+
+    def _scroll_results_container(self, item: WebElement) -> bool:
+        result = self.driver.execute_script(
             """
             const item = arguments[0];
             if (!item) {
-                return;
+                return false;
             }
 
             const scrollableOverflow = new Set(["auto", "scroll", "overlay"]);
@@ -358,21 +510,29 @@ class BaseMapsScraper(ABC):
                 );
             }
 
-            item.scrollIntoView({ block: "end", inline: "nearest" });
-
             let container = item.parentElement;
             while (container && container !== document.body && container !== document.documentElement) {
                 if (isScrollable(container)) {
-                    container.scrollTop = container.scrollHeight;
-                    return;
+                    const before = container.scrollTop;
+                    item.scrollIntoView({ block: "end", inline: "nearest" });
+                    const step = Math.max(Math.floor(container.clientHeight * 0.85), 320);
+                    container.scrollTop = Math.min(container.scrollTop + step, container.scrollHeight);
+                    if (Math.abs(container.scrollTop - before) <= 1) {
+                        container.scrollTop = container.scrollHeight;
+                    }
+                    return Math.abs(container.scrollTop - before) > 1;
                 }
                 container = container.parentElement;
             }
 
+            const before = window.scrollY;
+            item.scrollIntoView({ block: "end", inline: "nearest" });
             window.scrollBy(0, Math.max(Math.floor(window.innerHeight * 0.85), 320));
+            return Math.abs(window.scrollY - before) > 1;
             """,
             item,
         )
+        return bool(result)
 
     @abstractmethod
     def search_category_urls(
@@ -551,6 +711,14 @@ class YandexMapsScraper(BaseMapsScraper):
 class TwoGisScraper(BaseMapsScraper):
     provider_key = "2gis"
     SEARCH_RESULT_SELECTOR = 'a[href*="/firm/"]'
+    SEARCH_PAGE_LINK_SELECTOR = 'a[href*="/search/"][href*="/page/"]'
+    FIRM_PATH_RE = re.compile(
+        r"(?P<host>https?://[^/\"'<>\s\\]+)?/"
+        r"(?P<city>[^/\"'<>\s\\]+)/firm/(?P<id>\d+)"
+        r"(?=[/?#\"'<>\s\\]|$)"
+    )
+    SEARCH_CURRENT_PAGE_RE = re.compile(r'"currentPage"\s*:\s*(\d+)')
+    SEARCH_TOTAL_PAGES_RE = re.compile(r'"pages"\s*:\s*(\d+)')
     PAGE_NUMBER_RE = re.compile(r"/page/(\d+)(?:[/?#]|$)")
 
     def search_category_urls(
@@ -564,28 +732,32 @@ class TwoGisScraper(BaseMapsScraper):
 
         query = urllib.parse.quote(f"{search_term} {city.query_name}")
         search_url = f"{city.two_gis_base_url}/search/{query}"
+        city_path = urllib.parse.urlparse(city.two_gis_base_url).path.strip("/")
+        self._current_city_slug = city_path.split("/", maxsplit=1)[0]
         urls: list[str] = []
         seen: set[str] = set()
-        visited_pages: set[str] = set()
+        visited_pages: set[int] = set()
         requested_page = 1
 
         while True:
-            self.driver.get(self._build_search_page_url(search_url, requested_page))
+            if requested_page <= 1 or not self._click_search_page_link(requested_page):
+                self.driver.get(self._build_search_page_url(search_url, requested_page))
             self.pause(4.5, 5.5)
             self._resolve_captcha_if_needed()
 
             current_page_url = self.normalize_detail_url(self.driver.current_url)
-            if current_page_url in visited_pages:
+            current_page = self._extract_current_search_page_number(current_page_url)
+            if current_page in visited_pages:
                 break
 
             if not self._wait_for_search_results():
                 break
-            visited_pages.add(current_page_url)
+            visited_pages.add(current_page)
 
-            current_page = self._extract_search_page_number(current_page_url)
             if current_page < requested_page:
                 break
 
+            total_pages = self._extract_search_total_pages()
             remaining = None if max_results is None else max_results - len(urls)
             page_urls = self.collect_detail_urls(
                 item_selector=self.SEARCH_RESULT_SELECTOR,
@@ -593,20 +765,45 @@ class TwoGisScraper(BaseMapsScraper):
                 extractor=self._extract_result_url,
             )
 
-            added = 0
-            for page_result_url in page_urls:
-                normalized_url = self.normalize_detail_url(page_result_url)
-                if normalized_url in seen:
-                    continue
+            def add_page_urls(result_urls: list[str]) -> int:
+                added_count = 0
+                for page_result_url in result_urls:
+                    normalized_url = self.normalize_detail_url(page_result_url)
+                    if normalized_url in seen:
+                        continue
 
-                seen.add(normalized_url)
-                urls.append(normalized_url)
-                added += 1
+                    seen.add(normalized_url)
+                    urls.append(normalized_url)
+                    added_count += 1
 
-                if max_results is not None and len(urls) >= max_results:
-                    return urls[:max_results]
+                    if max_results is not None and len(urls) >= max_results:
+                        break
+                return added_count
+
+            added = add_page_urls(page_urls)
 
             if added == 0:
+                self.pause(2.5, 3.5)
+                page_urls = self.collect_detail_urls(
+                    item_selector=self.SEARCH_RESULT_SELECTOR,
+                    max_results=remaining,
+                    extractor=self._extract_result_url,
+                )
+                added = add_page_urls(page_urls)
+
+            # total_suffix = f"/{total_pages}" if total_pages else ""
+            # print(
+            #     f"  [2ГИС] Страница {current_page}{total_suffix}: "
+            #     f"новых карточек {added}, всего {len(urls)}"
+            # )
+
+            if max_results is not None and len(urls) >= max_results:
+                return urls[:max_results]
+
+            if added == 0:
+                break
+
+            if total_pages is not None and current_page >= total_pages:
                 break
 
             requested_page = current_page + 1
@@ -637,10 +834,62 @@ class TwoGisScraper(BaseMapsScraper):
         )
 
     def normalize_detail_url(self, detail_url: str) -> str:
-        return detail_url.split("?", maxsplit=1)[0]
+        normalized_detail_url = normalize_markup_urls(detail_url).strip()
+        firm_url = self._normalize_firm_url(normalized_detail_url)
+        if firm_url:
+            return firm_url
+        return normalized_detail_url.split("#", maxsplit=1)[0].split("?", maxsplit=1)[0]
 
     def _extract_result_url(self, item: WebElement) -> str | None:
         return item.get_attribute("href")
+
+    def _extract_page_source_detail_urls(self) -> list[str]:
+        page_source = getattr(self.driver, "page_source", "")
+        return self._extract_firm_urls_from_markup(page_source)
+
+    def _extract_firm_urls_from_markup(self, markup: str) -> list[str]:
+        normalized_markup = normalize_markup_urls(markup)
+        urls: list[str] = []
+        seen: set[str] = set()
+
+        for match in self.FIRM_PATH_RE.finditer(normalized_markup):
+            firm_url = self._normalize_firm_match(match)
+            if not firm_url or firm_url in seen:
+                continue
+
+            seen.add(firm_url)
+            urls.append(firm_url)
+
+        return urls
+
+    def _normalize_firm_url(self, url: str) -> str | None:
+        match = self.FIRM_PATH_RE.search(url)
+        if not match:
+            return None
+        return self._normalize_firm_match(match)
+
+    def _normalize_firm_match(self, match: re.Match[str]) -> str | None:
+        host = match.group("host") or ""
+        city_slug = match.group("city")
+        firm_id = match.group("id")
+        expected_city_slug = getattr(self, "_current_city_slug", "")
+        if expected_city_slug and city_slug != expected_city_slug:
+            return None
+
+        if host:
+            parsed_host = urllib.parse.urlparse(host)
+            hostname = (parsed_host.hostname or "").casefold()
+            if not hostname or not is_two_gis_domain(hostname):
+                return None
+            origin = f"{parsed_host.scheme}://{parsed_host.netloc}"
+        else:
+            current_url = getattr(self.driver, "current_url", "")
+            parsed_current_url = urllib.parse.urlparse(current_url)
+            if not parsed_current_url.scheme or not parsed_current_url.netloc:
+                return None
+            origin = f"{parsed_current_url.scheme}://{parsed_current_url.netloc}"
+
+        return f"{origin}/{city_slug}/firm/{firm_id}"
 
     def _wait_for_search_results(self) -> bool:
         try:
@@ -655,6 +904,47 @@ class TwoGisScraper(BaseMapsScraper):
         if page_number <= 1:
             return search_url
         return f"{search_url}/page/{page_number}"
+
+    def _click_search_page_link(self, page_number: int) -> bool:
+        for anchor in self.driver.find_elements(By.CSS_SELECTOR, self.SEARCH_PAGE_LINK_SELECTOR):
+            href = anchor.get_attribute("href") or ""
+            if self._extract_search_page_number(href) != page_number:
+                continue
+
+            try:
+                self.driver.execute_script(
+                    """
+                    arguments[0].scrollIntoView({ block: "center", inline: "nearest" });
+                    arguments[0].click();
+                    """,
+                    anchor,
+                )
+            except Exception:
+                try:
+                    anchor.click()
+                except Exception:
+                    continue
+            return True
+
+        return False
+
+    def _extract_current_search_page_number(self, current_url: str) -> int:
+        url_page_number = self._extract_search_page_number(current_url)
+        if url_page_number > 1:
+            return url_page_number
+
+        page_source = normalize_markup_urls(getattr(self.driver, "page_source", ""))
+        match = self.SEARCH_CURRENT_PAGE_RE.search(page_source)
+        if not match:
+            return url_page_number
+        return int(match.group(1))
+
+    def _extract_search_total_pages(self) -> int | None:
+        page_source = normalize_markup_urls(getattr(self.driver, "page_source", ""))
+        match = self.SEARCH_TOTAL_PAGES_RE.search(page_source)
+        if not match:
+            return None
+        return int(match.group(1))
 
     def _extract_search_page_number(self, current_url: str) -> int:
         match = self.PAGE_NUMBER_RE.search(current_url)
@@ -688,6 +978,11 @@ class TwoGisScraper(BaseMapsScraper):
                 href = anchor.get_attribute("href") or ""
                 if has_business_website_link([href]):
                     return True
+
+        marked_website_links = extract_marked_website_links(getattr(self.driver, "page_source", ""))
+        if marked_website_links and has_business_website_link(marked_website_links):
+            return True
+
         return False
 
     def _collect_card_hrefs(self) -> list[str]:
