@@ -26,6 +26,26 @@ class TwoGisWebsiteDetectionTests(unittest.TestCase):
 
         self.assertTrue(has_business_website_link(hrefs))
 
+    def test_detects_legacy_2gis_redirect_targets_with_query_params(self) -> None:
+        hrefs = [
+            "http://link.2gis.ru/1.2/FCC64F90/online/20260601/project32/"
+            "70000001063551091/null/example?"
+            "http://mozhayka.rvbar.ru/?utm_source=2gis&utm_medium=resto",
+            "http://link.2gis.ru/1.2/49E1AF35/online/20260601/project32/"
+            "70000001045623203/null/example?"
+            "http://blabla.bar/?utm_source=2gis&utm_medium=prioritet",
+            "http://link.2gis.ru/1.2/CE647B08/online/20260601/project32/"
+            "70000001076499420/null/example?"
+            "http://tvtower.ru/services/restaurant/?utm_source=2gis&utm_medium=2gis",
+        ]
+
+        self.assertTrue(has_business_website_link(hrefs))
+
+        self.assertIn(
+            "http://blabla.bar/?utm_source=2gis&utm_medium=prioritet",
+            extract_business_website_candidates(hrefs[1]),
+        )
+
     def test_ignores_social_and_2gis_service_links(self) -> None:
         hrefs = [
             "https://awards.2gis.ru/",

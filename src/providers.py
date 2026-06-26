@@ -169,7 +169,7 @@ def extract_proxy_path_website_candidates(parsed_href: urllib.parse.ParseResult)
 
 
 def extract_business_website_candidates(href: str) -> list[str]:
-    normalized_href = html.unescape(href).strip()
+    normalized_href = html.unescape(href).replace("\\/", "/").strip()
     if not normalized_href.startswith(("http://", "https://")):
         return []
 
@@ -184,16 +184,16 @@ def extract_business_website_candidates(href: str) -> list[str]:
 
     query_payload = html.unescape(parsed_href.query)
     if query_payload:
+        decoded_query = urllib.parse.unquote(query_payload)
+        if decoded_query.startswith(("http://", "https://")):
+            candidates.append(decoded_query.rstrip(".,);"))
+
         if "=" in query_payload:
             query_pairs = urllib.parse.parse_qsl(query_payload, keep_blank_values=True)
             for _, value in query_pairs:
                 decoded_value = urllib.parse.unquote(html.unescape(value))
                 if decoded_value.startswith(("http://", "https://")):
                     candidates.append(decoded_value.rstrip(".,);"))
-        else:
-            decoded_query = urllib.parse.unquote(query_payload)
-            if decoded_query.startswith(("http://", "https://")):
-                candidates.append(decoded_query.rstrip(".,);"))
 
     fragment_payload = urllib.parse.unquote(html.unescape(parsed_href.fragment))
     if fragment_payload:
